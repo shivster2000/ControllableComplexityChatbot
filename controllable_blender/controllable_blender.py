@@ -1,107 +1,58 @@
-from parlai.core.opt import Opt
-from parlai.utils.typing import TShared
-from parlai.agents.transformer.transformer import TransformerGeneratorAgent
+import torch
+from transformers import AutoTokenizer, AutoModelForCausalLM
 
-from .generation_methods import VocabTopKSampling, RerankedTopKSampling
-from .generation_utils import Wordlist, Reranker, load_wordlist, cefr_to_int
+from generation_utils import Wordlist, Reranker
 
-class ControllableBlender(TransformerGeneratorAgent):
-    def __init__(self, opt: Opt, shared: TShared = None):
-        super().__init__(opt, shared)
+class ControllableDialoGPT:
+    def __init__(self, config):
+        self.model = AutoModelForCausalLM.from_pretrained("microsoft/DialoGPT-medium")
+        self.tokenizer = AutoTokenizer.from_pretrained("microsoft/DialoGPT-medium")
+        self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+        self.model.to(self.device)
+        self.history = None
+        self.reranker = config.get("reranker", None)
+        self.wordlist = config.get("wordlist", None)
+        self.interactive_mode = config.get("interactive_mode", False)
 
-        if opt.get("inference", None) == "vocab":
-            wordlist_path = opt.get("wordlist_path", None)
-            assert wordlist_path, "Please provide path to vocab list, in order to use inference method 'vocab'"
+    def set_interactive_mode(self, mode: bool):
+        self.interactive_mode = mode
 
-            allowed_words = load_wordlist(wordlist_path)
-            self.wordlist = Wordlist(allowed_words, self.dict)
+    def generate_response(self, user_input):
+        input_ids = self.tokenizer.encode(user_input + self.tokenizer.eos_token, return_tensors="pt").to(self.device)
+        full_input = torch.cat([self.history, input_ids], dim=-1) if self.history is not None else input_ids
 
-        elif opt.get("inference", None) == "rerank":
-            cefr = opt.get("rerank_cefr", None)
-            assert cefr, "Please provide CEFR level, in order to use inference method 'rerank'"
+        outputs = self.model.generate(
+            full_input,
+            max_length=1000,
+            pad_token_id=self.tokenizer.eos_token_id,
+            do_sample=True,
+            top_k=40,
+            top_p=0.95,
+            temperature=0.7,
+            num_return_sequences=20 if self.reranker else 1
+        )
 
-            rerank_tokenizer = opt.get("rerank_tokenizer", None)
-            rerank_model = opt.get("rerank_model", None)
-            assert rerank_model, "Please provide path to directory containing model weights, in order to use inference method 'rerank'"
+        candidates = [
+            self.tokenizer.decode(out[full_input.shape[-1]:], skip_special_tokens=True)
+            for out in outputs
+        ]
+        
+        if self.wordlist:
+            candidates = [c for c in candidates if self._passes_vocab_filter(c)]
 
-            device = opt.get("complexity_model_device", None)
-            penalty_stddev = opt.get("penalty_stddev", None)
-            text_truncate = opt.get("text_truncate", None)
+        if not candidates:
+            return "[No valid response]"
 
-            word_filter = None
-            filter_path = opt.get("filter_path", "")
-            if filter_path:
-                word_filter = load_wordlist(filter_path)
-
-            exempt_tokens = [self.dict.tok2ind.get(self.dict.null_token),
-                             self.dict.tok2ind.get(self.dict.start_token),
-                             self.dict.tok2ind.get(self.dict.end_token),
-                             self.dict.tok2ind.get(self.dict.unk_token)]
-
-            if penalty_stddev < 0:
-                exempt_tokens = "all"
-
-            self.reranker = Reranker(cefr=cefr_to_int(cefr),
-                                     model=rerank_model,
-                                     tokenizer=rerank_tokenizer,
-                                     device=device,
-                                     text_truncate=text_truncate,
-                                     exempt_tokens=exempt_tokens,
-                                     penalty_stddev=penalty_stddev,
-                                     vocab_size=len(self.dict),
-                                     word_filter=word_filter)
-
+        if self.reranker:
+            candidates = [self.tokenizer.decode(out[full_input.shape[-1]:], skip_special_tokens=True) for out in outputs]
+            best_response = self.reranker.rank(candidates)
         else:
-            raise ValueError(f"Inference method {opt.get('inference', None)} does not exist. "
-                             f"Please use 'vocab' or 'rerank'.")
+            best_response = self.tokenizer.decode(outputs[:, full_input.shape[-1]:][0], skip_special_tokens=True)
 
+        self.history = torch.cat([full_input, self.tokenizer.encode(best_response + self.tokenizer.eos_token, return_tensors="pt").to(self.device)], dim=-1)
+        return best_response
 
-    def _treesearch_factory(self, device, verbose=False):
-        method = self.opt.get('inference', 'greedy')
-        beam_size = self.opt.get('beam_size', 1)
-        if method == 'vocab':
-            return VocabTopKSampling(
-                k=self.opt.get('topk', 40),
-                wordlist=self.wordlist,
-                beam_size=beam_size,
-                min_length=self.beam_min_length,
-                block_ngram=self.beam_block_ngram,
-                context_block_ngram=self.beam_context_block_ngram,
-                length_penalty=self.opt.get('beam_length_penalty', 0.65),
-                padding_token=self.NULL_IDX,
-                bos_token=self.START_IDX,
-                eos_token=self.END_IDX,
-                device=device,
-                verbose=verbose,
-            )
-        elif method == "rerank":
-            return RerankedTopKSampling(
-                k=self.opt.get('topk', 40),
-                reranker=self.reranker,
-                tokenids_to_text=self._v2t,
-                beam_size=beam_size,
-                min_length=self.beam_min_length,
-                block_ngram=self.beam_block_ngram,
-                context_block_ngram=self.beam_context_block_ngram,
-                length_penalty=self.opt.get('beam_length_penalty', 0.65),
-                padding_token=self.NULL_IDX,
-                bos_token=self.START_IDX,
-                eos_token=self.END_IDX,
-                device=device,
-                verbose=verbose,
-            )
-        else:
-            return super()._treesearch_factory(device, verbose=verbose)
+    def _passes_vocab_filter(self, text: str) -> bool:
 
-    def share(self):
-        """
-        Share internal states between parent and child instances.
-        """
-        shared = super().share()
-        if hasattr(self, 'wordlist'):
-            shared['wordlist'] = self.wordlist
-        if hasattr(self, 'reranker'):
-            shared['reranker'] = self.reranker
-        return shared
-
-
+        tokens = text.strip().split()
+        return all(word.lower().strip(".,!?") in self.wordlist.allowed_token_seqs for word in tokens)
