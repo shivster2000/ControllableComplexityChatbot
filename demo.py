@@ -1,48 +1,38 @@
-import json
+from transformers import AutoModelForCausalLM, AutoTokenizer
+import torch
 
-from parlai.zoo.blender.blender_3B import download
-from parlai.core.opt import Opt
+from controllable_dialogpt import ControllableDialoGPT
 
-from controllable_blender import ControllableBlender
-from demo_utils import start_interaction
+from generation_utils import Reranker, Wordlist, cefr_to_int, load_wordlist
 
-agent_opt = json.load(open("blender_3B.opt", 'r'))
+tokenizer = AutoTokenizer.from_pretrained("microsoft/DialoGPT-medium")
+model = AutoModelForCausalLM.from_pretrained("microsoft/DialoGPT-medium")
+vocab = load_wordlist("data/sample_wordlist.txt")
 
+# Replace agent_opt JSON with dict config
+config = {
+    "model_name": "microsoft/DialoGPT-medium",
+    "device": "cuda" if torch.cuda.is_available() else "cpu",
+    "top_k": 40,
+    "top_p": 0.95,
+    "num_return_sequences": 20,  # for reranking
+    "reranker": Reranker(
+        model="complexity_model",
+        tokenizer="distilroberta-base",
+        device="cuda",
+        cefr=3
+    ),   
+    "wordlist": Wordlist(vocab, tokenizer)
 
-# Set to "vocab" for vocabulary restriction, "rerank" for candidate reranking
-agent_opt["inference"] = "rerank"
-
-# Same top-k sampling configs for all settings described in the paper
-agent_opt["beam_size"] = 20
-agent_opt["topk"] = 40
-
-# Settings for rerank methods (not used if "inference" == "vocab")
-agent_opt["rerank_cefr"] = "B2"                             # CEFR level to adjust reranking. Possible values: ['A2', 'B1', 'B2', 'C1', 'C2'].
-agent_opt["rerank_tokenizer"] = "distilroberta-base"        # Tokenizer from Huggingface Transformers. Must be compatible with "rerank_model"
-agent_opt["rerank_model"] = "complexity_model"              # Model fine-tuned on complexity data
-agent_opt["rerank_model_device"] = "cuda"                   # Device for complexity model
-agent_opt["penalty_stddev"] = 2                             # Controls how harshly sub-tokens are penalised (lower = harsher). Use -1 to remove penalties
-agent_opt["filter_path"] = "data/filter.txt"                # Path to list of English words to ensure OOV words are not generated. Capitalised words are ignored. Use empty string to remove filter
-
-# Settings for vocab methods (not used if "inference" == "rerank")
-agent_opt["wordlist_path"] = "data/sample_wordlist.txt"          # Path to list of vocab the chatbot is restricted to
-
-
-download(agent_opt["datapath"])
-
-agent = ControllableBlender(agent_opt)
-agent.set_interactive_mode(True)
-
-# See https://github.com/facebookresearch/ParlAI/blob/main/parlai/scripts/interactive.py
-interaction_opts = {
-    "display_examples": False,
-    "display_add_fields": "",
-    "interactive_task": True,
-    "outfile": "",
-    "save_format": "conversations",
-    "log_keep_fields": "all",
-    "task": "interactive",
-    "datatype": "test"
 }
 
-start_interaction(agent, Opt(interaction_opts))
+agent = ControllableDialoGPT(config)
+
+print("Start chatting (type 'exit' to stop):")
+while True:
+    user_input = input(">> User: ")
+    if user_input.lower() in ["exit", "quit"]:
+        break
+    response = agent.generate_response(user_input)
+    print(f"🤖 Bot: {response}")
+agent.set_interactive_mode(True)
