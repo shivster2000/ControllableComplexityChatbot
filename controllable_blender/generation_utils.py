@@ -1,11 +1,11 @@
 import math
 import os
 import json
-from typing import List, Set, Union, Optional
+from typing import List, Set, Dict, Union, Optional
 
 import numpy as np
 import torch
-from parlai.core.dict import DictionaryAgent
+from transformers import PreTrainedTokenizer
 from transformers import RobertaForSequenceClassification, RobertaTokenizer
 
 def cefr_to_int(cefr: str) -> int:
@@ -43,63 +43,48 @@ def load_wordlist(path: str) -> List[str]:
 
 
 class Wordlist():
-    def __init__(self, allowed_words: List[str], dict_agent: DictionaryAgent):
-        self.dict_agent = dict_agent
-
-        # Identify IDs that represent a word boundary and those that don't
-        self.boundary_ids = []
-        self.non_boundary_ids = []
-
-        for idx, subtoken in dict_agent.ind2tok.items():
-            if subtoken[0] == "\u0120" or not subtoken.isalpha():
-                self.boundary_ids.append(idx)
-            else:
-                self.non_boundary_ids.append(idx)
+    def __init__(self, vocab: List[str], tokenizer: PreTrainedTokenizer):
+        self.tokenizer = tokenizer
 
         # Identify token ID sequences that are allowed words
         # Identify allowed continuations of sequences
-        self.allowed_sequences = []
-        self.allowed_continuations = {}
-        for word in allowed_words:
-            for word_variant in self._get_word_variants(word):
-                token_ids = dict_agent.txt2vec(word_variant)
-                self.allowed_sequences.append(repr(token_ids))
+        self.allowed_token_seqs: Set[str] = set()
+        self.allowed_continuations: Dict[str, List[int]] = {}
 
-                for i, idx in enumerate(token_ids[1:]):
-                    prefix = repr(token_ids[:i + 1])      # List represented as string for lookup
+        for word in vocab:
+            for word_variant in self._get_word_variants(word):
+                token_ids = tokenizer.encode(word_variant, add_special_tokens=False)
+                if not token_ids:
+                    continue
+
+                self.allowed_token_seqs.add(repr(token_ids))
+
+                for i in range(1, len(token_ids)):
+                    prefix = repr(token_ids[:i])  
+                    next_token = token_ids[i]    # List represented as string for lookup
                     if prefix not in self.allowed_continuations:
                         self.allowed_continuations[prefix] = []
-                    self.allowed_continuations[prefix].append(idx)
-
-        self.allowed_sequences = set(self.allowed_sequences)
-
+                    self.allowed_continuations[prefix].append(next_token)
 
     def get_allowed_ids(self, token_ids: List[int]) -> List[int]:
+        """
+        adapts parlai-based _get_continuation_ids function
+        """
         last_word = self._get_last_word(token_ids)
-        continuation_ids = self._get_continuation_ids(last_word)
+        prefix_str = repr(last_word)
+        continuation_ids = self.allowed_continuations.get(prefix_str, [])
 
-        return continuation_ids
+        if self._is_word(last_word) or not last_word:
+          continuation_ids += self._get_starting_tokens()
+
+        return list(set(continuation_ids))
 
 
     def _is_word(self, token_ids: List[int]) -> bool:
         """
         For a given sequence of token IDs, determine whether that sequence is a complete word
         """
-        return (token_ids == [] or repr(token_ids) in self.allowed_sequences)
-
-
-    def _get_continuation_ids(self, token_ids: List[int]) -> List[int]:
-        """
-        For a given sequence of last word token IDs, determine which token IDs the word can continue with
-        """
-        continuation_ids = []
-        if repr(token_ids) in self.allowed_continuations:
-            continuation_ids.extend(self.allowed_continuations[repr(token_ids)])
-
-        if self._is_word(token_ids) or token_ids == []:
-            continuation_ids.extend(self.boundary_ids)
-
-        return continuation_ids
+        return repr(token_ids) in self.allowed_token_seqs
 
 
     def _get_last_word(self, token_ids: List[int]) -> List[int]:
@@ -107,17 +92,24 @@ class Wordlist():
         Get the sequence of token IDs after the last word boundary.
         Assumes that a word boundary is denoted by punctuation or whitespace (Ġ).
         """
-        for i in range(-1, -len(token_ids), -1):
-            last_word = token_ids[i:]
-            check_token = self.dict_agent[last_word[0]]
 
-            if not check_token.isalpha():
-                return last_word[1:]
+        if not token_ids:
+          return []
 
-            if check_token[0] == "Ġ":
-                return last_word
+        tokens = self.tokenizer.convert_ids_to_tokens(token_ids)
+        for i in range(len(token_ids) -1, -1, -1):
+            if tokens[i].startswith("Ġ") or tokens[i].startswith("_"):
+                return token_ids[i:]
+        return token_ids
 
-        raise ValueError("Boundary token not found")
+
+    def _get_starting_tokens(self) -> List[int]:
+        """ 
+        return token IDs that can start a word (e.g. Ġ or_ initial)
+        """
+        vocab = self.tokenizer.get_vocab()
+        starting_tokens = [idx for tok, idx in vocab.items() if tok.startswith("Ġ") or tok.startswith("_") or tok.isalpha()]
+        return starting_tokens
 
 
     def _get_word_variants(self, word: str) -> Set[str]:
