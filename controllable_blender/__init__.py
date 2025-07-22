@@ -1,1 +1,1 @@
-from .controllable_blender import ControllableBlender
+from .controllable_dialogpt import ControllableDialoGPT
