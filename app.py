@@ -1,15 +1,12 @@
+import gradio as gr
+import os
 import json
-
-from parlai.zoo.blender.blender_3B import download
 from parlai.core.opt import Opt
-
 from controllable_blender import ControllableBlender
-from demo_utils import start_interaction
+
+# Load options
 
 agent_opt = json.load(open("blender_3B.opt", 'r'))
-
-
-# Set to "vocab" for vocabulary restriction, "rerank" for candidate reranking
 agent_opt["inference"] = "rerank"
 
 # Same top-k sampling configs for all settings described in the paper
@@ -30,19 +27,28 @@ agent_opt["wordlist_path"] = "data/sample_wordlist.txt"          # Path to list 
 
 download(agent_opt["datapath"])
 
+print("Loading model...")
 agent = ControllableBlender(agent_opt)
-agent.set_interactive_mode(True)
 
-# See https://github.com/facebookresearch/ParlAI/blob/main/parlai/scripts/interactive.py
-interaction_opts = {
-    "display_examples": False,
-    "display_add_fields": "",
-    "interactive_task": True,
-    "outfile": "",
-    "save_format": "conversations",
-    "log_keep_fields": "all",
-    "task": "interactive",
-    "datatype": "test"
-}
+# Load model
+print("✅ Model loaded.")
 
-start_interaction(agent, Opt(interaction_opts))
+history = []
+
+def chat(user_message, cefr):
+    global history
+    opt["rerank_cefr"] = cefr
+    agent.observe({"text": user_message})
+    reply = agent.act()
+    return reply["text"]
+
+gr.Interface(
+    fn=chat,
+    inputs=[
+        gr.Textbox(label="Message"),
+        gr.Dropdown(["A1", "A2", "B1", "B2", "C1", "C2"], label="CEFR", value="B2")
+    ],
+    outputs="text",
+    title="Controllable Complexity Chatbot",
+    description="A BlenderBot with CEFR control (ParlAI + reranking)"
+).launch()
