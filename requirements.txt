@@ -5,4 +5,5 @@ regex
 gradio
 numpy
 setuptools
+iopath
 git+https://github.com/facebookresearch/ParlAI.git@1.6.0
