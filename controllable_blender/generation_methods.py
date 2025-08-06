@@ -18,7 +18,7 @@ class VocabTopKSampling(TopKSampling):
                  k: int,
                  wordlist: Wordlist,
                  *args, **kwargs):
-        super().__init__(*args, **kwargs)
+        super().__init__(k=k, *args, **kwargs)
         self.k = k
         self.wordlist = wordlist
 
